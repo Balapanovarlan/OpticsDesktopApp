@@ -63,8 +63,23 @@ class SecurityWindow(QMainWindow):
         self.load_current_recovery_model()
         self.load_available_logins()
         self.load_existing_users()
+        self.load_objects()
         self.load_mask_tables()
         self.load_audit_initial()
+
+
+    def load_objects(self):
+        """Загружает список всех таблиц для выдачи прав через процедуру usp_GetAllTables."""
+        try:
+            cursor = self.db_connection.get_cursor()
+            cursor.execute("EXEC usp_GetAllTables")
+            tables = [row[0] for row in cursor.fetchall()]
+            # Очищаем и заполняем комбобокс объектов
+            self.ui.cbObject.clear()
+            self.ui.cbObject.addItems(tables)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить список таблиц:\n{e}")
+
 
     def load_users_and_roles(self):
         try:
