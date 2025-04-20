@@ -176,7 +176,6 @@ class SecurityWindow(QMainWindow):
             # Получение текущего состояния и пути аудита из DMV
             name = self.ui.leAuditName.text().strip()
             if name:
-                cur.execute("USE master;")
                 cur.execute("""
                     SELECT status_desc, audit_file_path
                     FROM sys.dm_server_audit_status
@@ -213,8 +212,7 @@ class SecurityWindow(QMainWindow):
         try:
             cursor = self.db_connection.get_cursor()
             # Используем параметризованный запрос для безопасности
-            cursor.execute("CREATE LOGIN ? WITH PASSWORD = ?", 
-                        (login, password))
+            cursor.execute(f"CREATE LOGIN {login} WITH PASSWORD = '{password}' ")
             self.db_connection.connection.commit()
             
             QMessageBox.information(self, "Успех", "Логин успешно создан")
@@ -230,51 +228,77 @@ class SecurityWindow(QMainWindow):
     def create_user(self):
         login = self.ui.cbAvailableLogins.currentText()
         username = self.ui.leDbUserName.text().strip()
-        
         if not login or not username:
             QMessageBox.warning(self, "Ошибка", "Выберите логин и укажите имя пользователя")
             return
-            
+
         try:
             cursor = self.db_connection.get_cursor()
-            cursor.execute("EXEC usp_CreateDatabaseUser ?, ?", (login, username))
+            cursor.execute(
+                "EXEC [Optics].dbo.usp_CreateDatabaseUser ?, ?",
+                (login, username)
+            )
             result = cursor.fetchone()
-            
+            # **Обязательно «проглатываем» все оставшиеся наборы**
+            while cursor.nextset():
+                pass
+
             if result.ErrorCode == 0:
                 self.db_connection.connection.commit()
                 QMessageBox.information(self, "Успех", result.Message)
                 self.ui.leDbUserName.clear()
-                self.load_existing_users()  # Обновляем список пользователей
+
+                # Перезагружаем списки — эти методы создают СВОИ cursors
+                self.load_existing_users()
+                self.load_users_and_roles()
             else:
                 QMessageBox.warning(self, "Ошибка", result.Message)
-                
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось создать пользователя: {str(e)}")
 
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать пользователя:\n{e}")
+        finally:
+            # Закрываем cursor, чтобы гарантировать, что он не будет удерживать ресурс
+            try:
+                cursor.close()
+            except:
+                pass
 
     def create_role(self):
-        """Создание новой роли через хранимую процедуру"""
+        """Создание новой роли через хранимую процедуру с очисткой курсора и закрытием."""
         role_name = self.ui.leRoleName.text().strip()
-        
         if not role_name:
             QMessageBox.warning(self, "Ошибка", "Введите имя роли")
             return
-        
+
+        cursor = None
         try:
             cursor = self.db_connection.get_cursor()
-            cursor.execute("EXEC usp_CreateRole ?", (role_name,))
+            # Вызываем процедуру через трёхчастное имя
+            cursor.execute("EXEC [Optics].dbo.usp_CreateRole ?", (role_name,))
             result = cursor.fetchone()
-            
+            # Проглатываем все оставшиеся result‑set’ы
+            while cursor.nextset():
+                pass
+
             if result.ErrorCode == 0:
                 self.db_connection.connection.commit()
                 QMessageBox.information(self, "Успех", result.Message)
-                self.load_users_and_roles()
                 self.ui.leRoleName.clear()
+                # Перезагружаем список ролей и пользователей
+                self.load_users_and_roles()
             else:
                 QMessageBox.warning(self, "Ошибка", result.Message)
-                
+
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось создать роль: {str(e)}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать роль:\n{e}")
+        finally:
+            # Закрываем cursor, чтобы освободить соединение
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+
 
     def assign_role(self):
         user = self.ui.cbUser.currentText()
@@ -344,62 +368,42 @@ class SecurityWindow(QMainWindow):
     
     def delete_user(self):
         selected_user = self.ui.cbExistingUsers.currentText()
-        # Проверяем, что пользователь выбран
         if not selected_user:
-            QMessageBox.warning(
-                self,
-                "Ошибка выбора",
-                "Пожалуйста, выберите пользователя для удаления",
-                QMessageBox.StandardButton.Ok
-            )
+            QMessageBox.warning(self, "Ошибка", "Выберите пользователя для удаления")
             return
-        # Запрашиваем подтверждение
-        confirm = QMessageBox.question(
-            self,
-            "Подтверждение удаления",
-            f"Вы действительно хотите удалить пользователя '{selected_user}'?\n"
-            "Это действие нельзя отменить!",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if confirm != QMessageBox.StandardButton.Yes:
+
+        confirm = QMessageBox.question(self, "Подтверждение",
+                                    f"Удалить '{selected_user}'?", 
+                                    QMessageBox.Yes | QMessageBox.No)
+        if confirm != QMessageBox.Yes:
             return
-        
+
         try:
-            # Выполняем удаление через хранимую процедуру
-            with self.db_connection.get_cursor() as cursor:
-                cursor.execute("EXEC usp_DeleteDatabaseUser @UserName = ?", selected_user)
-                result = cursor.fetchone()
-                
-                # Обрабатываем результат
-                if result.ErrorCode == 0:
-                    self.db_connection.connection.commit()
-                    QMessageBox.information(
-                        self,
-                        "Успешное удаление",
-                        f"Пользователь '{selected_user}' успешно удален",
-                        QMessageBox.StandardButton.Ok
-                    )
-                    
-                    # Обновляем списки
-                    self.load_existing_users()
-                    self.load_users_and_roles()
-                else:
-                    QMessageBox.warning(
-                        self,
-                        "Ошибка удаления",
-                        result.Message,
-                        QMessageBox.StandardButton.Ok
-                    )
-        
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Критическая ошибка",
-                f"Не удалось удалить пользователя:\n{str(e)}",
-                QMessageBox.StandardButton.Ok
+            cursor = self.db_connection.get_cursor()
+            cursor.execute(
+                "EXEC [Optics].dbo.usp_DeleteDatabaseUser @UserName = ?", 
+                (selected_user,)
             )
+            result = cursor.fetchone()
+            while cursor.nextset():
+                pass
+
+            if result.ErrorCode == 0:
+                self.db_connection.connection.commit()
+                QMessageBox.information(self, "Успешно", result.Message)
+                self.load_existing_users()
+                self.load_users_and_roles()
+            else:
+                QMessageBox.warning(self, "Ошибка", result.Message)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось удалить пользователя:\n{e}")
+        finally:
+            try:
+                cursor.close()
+            except:
+                pass
+
 
     def revoke_role(self):
         user = self.ui.cbRevokeUser.currentText()
@@ -461,6 +465,7 @@ class SecurityWindow(QMainWindow):
 
     def load_current_recovery_model(self):
         """Загрузка текущей модели восстановления"""
+        
         try:
             cursor = self.db_connection.get_cursor()
             cursor.execute("""
@@ -515,14 +520,18 @@ class SecurityWindow(QMainWindow):
 
     def restore_database(self):
         """Выполнить восстановление через usp_RestoreDatabase из контекста master."""
-        # 1) Сбор параметров из UI
         backup_path  = self.ui.leRestoreFile.text().strip()
         mode         = self.ui.cbRestoreMode.currentText()
         replace_flag = 1 if self.ui.cbReplace.isChecked() else 0
         standby_file = self.ui.leStandbyFile.text().strip() if mode == "STANDBY" else None
-        db_name      = 'Optics'  # можно брать из self.db_connection.database
 
-        # 2) Простая валидация
+        # Текущая база, в которую нужно вернуть контекст
+        db_name = getattr(self.db_connection, "database", None)
+        if not db_name:
+            QMessageBox.warning(self, "Ошибка", "Не удалось определить текущую базу данных.")
+            return
+
+        # 2) Валидация
         if not backup_path:
             QMessageBox.warning(self, "Ошибка", "Укажите файл бэкапа для восстановления")
             return
@@ -530,26 +539,27 @@ class SecurityWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Для режима STANDBY укажите файл Standby")
             return
 
+        cursor = self.db_connection.get_cursor()
         try:
-            cursor = self.db_connection.get_cursor()
-
-            # 3a) Сначала переключаемся на master
+            # 3) Переключаемся в master и вызываем процедуру
             cursor.execute("USE master;")
-
-            # 3b) А теперь вызываем нашу процедуру
             cursor.execute(
-                "EXEC master.dbo.usp_RestoreDatabase "
-                "?, ?, ?, ?, ?",
+                "EXEC master.dbo.usp_RestoreDatabase ?, ?, ?, ?, ?",
                 (db_name, backup_path, mode, replace_flag, standby_file)
             )
-
-            # 4) Фиксируем изменения
             self.db_connection.connection.commit()
 
         except Exception as e:
-            # Показываем полное сообщение об ошибке
             QMessageBox.critical(self, "Ошибка восстановления", str(e))
             return
+
+        finally:
+            # 4) Всегда возвращаемся в исходную базу
+            try:
+                cursor.execute(f"USE [{db_name}];")
+            except:
+                # если не удалось, просто игнорируем — основная работа уже сделана
+                pass
 
         # 5) Успех
         QMessageBox.information(self, "Успех", f"База «{db_name}» успешно восстановлена")
@@ -745,39 +755,47 @@ class SecurityWindow(QMainWindow):
             self.ui.leAuditPath.setText(path)
 
     def create_or_update_audit(self):
+        """Создать или обновить аудит через master.dbo.sp_CreateAudit,
+        затем вернуть контекст в исходную базу."""
         name      = self.ui.leAuditName.text().strip()
         folder    = self.ui.leAuditPath.text().strip()
         max_size  = self.ui.spinMaxSize.value()
         max_files = self.ui.spinMaxFiles.value()
-        # можно брать имя БД из подключения, или жестко указать 'Optics'
-        db_name   = getattr(self.db_connection, "database", "Optics")
 
-        if not (name and folder):
-            QMessageBox.warning(self, "Ошибка", "Заполните имя аудита и каталог.")
+        # Текущая база, в которой надо вернуть контекст
+        db_name = getattr(self.db_connection, "database", None)
+        if not (name and folder and db_name):
+            QMessageBox.warning(self, "Ошибка", "Заполните все поля и убедитесь, что выбрана база.")
             return
 
-        # ещё раз нормализуем папку под SQL Server
+        # Нормализация пути для SQL Server
         folder = folder.replace('/', '\\')
         if not folder.endswith('\\'):
             folder += '\\'
 
+        cursor = self.db_connection.get_cursor()
         try:
-            cur = self.db_connection.get_cursor()
-            # убедимся, что в контексте master
-            cur.execute("USE master;")
-            # единичный вызов процедуры
-            cur.execute(
+            # Переключаемся на master и вызываем процедуру
+            cursor.execute("USE master;")
+            cursor.execute(
                 "EXEC master.dbo.sp_CreateAudit "
                 "@AuditName = ?, @AuditPath = ?, @MaxSizeMB = ?, @MaxFiles = ?, @DatabaseName = ?",
                 (name, folder, max_size, max_files, db_name)
             )
             self.db_connection.connection.commit()
-            QMessageBox.information(self, "Успех", "Аудит создан/обновлён через процедуру.")
+            QMessageBox.information(self, "Успех", "Аудит создан или обновлён.")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
+        finally:
+            # Возвращаемся в исходную базу
+            try:
+                cursor.execute(f"USE [{db_name}];")
+            except:
+                pass
 
 
     def create_or_update_spec(self):
+        """Создаёт или обновляет спецификацию аудита, с переключением контекста в master или нужную БД и возвратом в исходную."""
         audit_name = self.ui.leAuditName.text().strip()
         if not audit_name:
             QMessageBox.warning(self, "Ошибка", "Сначала создайте Audit (SERVER AUDIT).")
@@ -792,73 +810,85 @@ class SecurityWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Отметьте хотя бы одно действие.")
             return
 
-        try:
-            cur = self.db_connection.get_cursor()
+        cur = self.db_connection.get_cursor()
+        # запомним исходную базу для возврата
+        orig_db = getattr(self.db_connection, "database", None)
 
+        try:
             if self.ui.rbServer.isChecked():
                 spec = f"{audit_name}_ServerSpec"
+                # работаем в master
                 cur.execute("USE master;")
 
                 cur.execute("""
                     IF EXISTS (SELECT 1 FROM sys.server_audit_specifications WHERE name = ?)
                     BEGIN
                         ALTER SERVER AUDIT SPECIFICATION [{}] WITH (STATE = OFF);
-                        DROP  SERVER AUDIT SPECIFICATION [{}];
+                        DROP SERVER AUDIT SPECIFICATION [{}];
                     END
                 """.format(spec, spec), (spec,))
 
-                cur.execute(f"CREATE SERVER AUDIT SPECIFICATION [{spec}] "
-                            f"FOR SERVER AUDIT [{audit_name}];")
-
-                for ag in actions:
-                    cur.execute(f"ALTER SERVER AUDIT SPECIFICATION [{spec}] ADD ({ag});")
-
+                cur.execute(f"CREATE SERVER AUDIT SPECIFICATION [{spec}] FOR SERVER AUDIT [{audit_name}];")
+                for action in actions:
+                    cur.execute(f"ALTER SERVER AUDIT SPECIFICATION [{spec}] ADD ({action});")
                 cur.execute(f"ALTER SERVER AUDIT SPECIFICATION [{spec}] WITH (STATE = ON);")
 
-            else:  # Database‑level
-                db_name = self.ui.cbSpecDb.currentText()
-                spec = f"{audit_name}_{db_name}_DbSpec"
-
-                cur.execute(f"USE [{db_name}];")
+            else:
+                # Database‑level
+                target_db = self.ui.cbSpecDb.currentText()
+                spec = f"{audit_name}_{target_db}_DbSpec"
+                # переключаемся в целевую БД
+                cur.execute(f"USE [{target_db}];")
 
                 cur.execute("""
                     IF EXISTS (SELECT 1 FROM sys.database_audit_specifications WHERE name = ?)
                     BEGIN
                         ALTER DATABASE AUDIT SPECIFICATION [{}] WITH (STATE = OFF);
-                        DROP  DATABASE AUDIT SPECIFICATION [{}];
+                        DROP DATABASE AUDIT SPECIFICATION [{}];
                     END
                 """.format(spec, spec), (spec,))
 
-                cur.execute(f"CREATE DATABASE AUDIT SPECIFICATION [{spec}] "
-                            f"FOR SERVER AUDIT [{audit_name}];")
-
-                for ag in actions:
-                    cur.execute(f"ALTER DATABASE AUDIT SPECIFICATION [{spec}] ADD ({ag});")
-
+                cur.execute(f"CREATE DATABASE AUDIT SPECIFICATION [{spec}] FOR SERVER AUDIT [{audit_name}];")
+                for action in actions:
+                    cur.execute(f"ALTER DATABASE AUDIT SPECIFICATION [{spec}] ADD ({action});")
                 cur.execute(f"ALTER DATABASE AUDIT SPECIFICATION [{spec}] WITH (STATE = ON);")
 
             self.db_connection.connection.commit()
             QMessageBox.information(self, "Успех", "Спецификация создана / обновлена.")
+
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
 
+        finally:
+            # всегда возвращаемся в исходную базу
+            if orig_db:
+                try:
+                    cur.execute(f"USE [{orig_db}];")
+                except:
+                    pass
+
+
     def toggle_audit_state(self):
+        """Переключает состояние Server Audit и возвращает контекст в исходную базу."""
         name = self.ui.leAuditName.text().strip()
         if not name:
             return
 
+        cur = self.db_connection.get_cursor()
+        orig_db = getattr(self.db_connection, "database", None)
+
         try:
-            cur = self.db_connection.get_cursor()
+            # Переключаемся в мастер
             cur.execute("USE master;")
 
-            # Получаем флаг is_state_enabled и возможный статус из DMV
+            # Получаем информацию об аудите
             cur.execute("""
                 SELECT 
                     s.is_state_enabled,
                     d.status_desc
                 FROM sys.server_audits AS s
-                LEFT JOIN sys.dm_server_audit_status AS d
-                ON s.name = d.name
+            LEFT JOIN sys.dm_server_audit_status AS d
+                    ON s.name = d.name
                 WHERE s.name = ?
             """, (name,))
             row = cur.fetchone()
@@ -867,43 +897,51 @@ class SecurityWindow(QMainWindow):
                 return
 
             is_enabled, status_desc = row
-            # Если status_desc есть — он точнее, иначе смотрим на is_state_enabled
             current = (
                 status_desc.upper()
                 if status_desc
                 else ("STARTED" if is_enabled == 1 else "OFF")
             )
 
-            # Меняем состояние: если сейчас запущен — выключаем, иначе — включаем
-            new_onoff = "OFF" if current == "STARTED" else "ON"
-            cur.execute(f"ALTER SERVER AUDIT [{name}] WITH (STATE = {new_onoff});")
+            # Решаем, включить или выключить
+            new_state = "OFF" if current == "STARTED" else "ON"
+            cur.execute(f"ALTER SERVER AUDIT [{name}] WITH (STATE = {new_state});")
             self.db_connection.connection.commit()
 
             # Обновляем UI
-            display = "STARTED" if new_onoff == "ON" else "OFF"
+            display = "STARTED" if new_state == "ON" else "OFF"
             self.ui.lblAuditState.setText(display)
-            self.ui.btnToggleAudit.setText(
-                "Выключить" if display == "STARTED" else "Включить"
-            )
+            self.ui.btnToggleAudit.setText("Выключить" if display == "STARTED" else "Включить")
 
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
 
+        finally:
+            # Всегда возвращаемся в исходную базу
+            if orig_db:
+                try:
+                    cur.execute(f"USE [{orig_db}];")
+                except:
+                    pass
+
 
     def refresh_audit_log(self):
+        """Обновляет таблицу с последними записями аудита, переключаясь в master и возвращая контекст."""
         folder = self.ui.leAuditPath.text().strip()
         if not folder:
             QMessageBox.warning(self, "Ошибка", "Не указан каталог файлов аудита.")
             return
 
-        # нормализация пути
+        # нормализация пути для SQL Server
         folder = folder.replace('/', '\\')
         if not folder.endswith('\\'):
             folder += '\\'
         pattern = folder + "*.sqlaudit"
 
+        cur = self.db_connection.get_cursor()
+        orig_db = getattr(self.db_connection, "database", None)
         try:
-            cur = self.db_connection.get_cursor()
+            # Переключаемся в master для чтения файлов аудита
             cur.execute("USE master;")
             cur.execute("""
                 SELECT TOP 200
@@ -917,7 +955,7 @@ class SecurityWindow(QMainWindow):
                     statement
                 FROM sys.fn_get_audit_file(?, DEFAULT, DEFAULT)
                 ORDER BY event_time DESC;
-            """, (pattern,))    
+            """, (pattern,))
 
             rows    = cur.fetchall()
             headers = [d[0] for d in cur.description]
@@ -929,5 +967,14 @@ class SecurityWindow(QMainWindow):
             for r, row in enumerate(rows):
                 for c, val in enumerate(row):
                     tbl.setItem(r, c, QTableWidgetItem(str(val) if val is not None else ""))
+
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", str(e))
+        finally:
+            # Возвращаемся в исходную базу
+            if orig_db:
+                try:
+                    cur.execute(f"USE [{orig_db}];")
+                except:
+                    pass
+
