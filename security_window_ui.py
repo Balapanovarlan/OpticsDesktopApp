@@ -1,7 +1,9 @@
 from PySide6.QtCore import QCoreApplication, QMetaObject, Qt
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, 
                                QFormLayout, QLineEdit, QPushButton, QComboBox, 
-                               QCheckBox, QFrame, QStackedWidget, QPlainTextEdit, QLabel, QTableWidget, QSpinBox)
+                               QCheckBox, QFrame, QStackedWidget, QPlainTextEdit,
+                                 QLabel, QTableWidget, QSpinBox, QScrollArea,
+                                 QRadioButton, QListWidget, QListWidgetItem)
 
 class Ui_SecurityWindow(object):
     def setupUi(self, SecurityWindow):
@@ -120,6 +122,9 @@ class Ui_SecurityWindow(object):
 
         self.btnMask = QPushButton("Маскировка данных", self.sidebar)
         self.btnMask.setCheckable(True)
+
+        self.btnAudit = QPushButton("Аудит", self.sidebar)   
+        self.btnAudit.setCheckable(True)
         
         # Добавляем кнопки
         self.sidebarLayout.addWidget(self.btnUserManagement)
@@ -128,6 +133,7 @@ class Ui_SecurityWindow(object):
         self.sidebarLayout.addWidget(self.btnBackup)
         self.sidebarLayout.addWidget(self.btnRestore)
         self.sidebarLayout.addWidget(self.btnMask)
+        self.sidebarLayout.addWidget(self.btnAudit)
         self.sidebarLayout.addStretch()
         
         # Контейнер страниц
@@ -158,6 +164,10 @@ class Ui_SecurityWindow(object):
         self.pageMask = QWidget()
         self.setupMaskPage()
         self.stackedWidget.addWidget(self.pageMask)
+
+        self.pageAudit = QWidget()                
+        self.setupAuditPage()                     
+        self.stackedWidget.addWidget(self.pageAudit)
 
             
         # Компоновка
@@ -512,6 +522,107 @@ class Ui_SecurityWindow(object):
         
         layout.addStretch()
 
+    def setupAuditPage(self):
+        # 1) Обёртка: scroll area
+        outer = QVBoxLayout(self.pageAudit)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea(self.pageAudit)
+        scroll.setWidgetResizable(True)
+        outer.addWidget(scroll)
+
+        container = QWidget()
+        scroll.setWidget(container)
+
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(12)
+
+        # --- Группа 1. Настройки приёмника ----------------
+        gbReceiver = QGroupBox("Настройки аудита (SERVER AUDIT)")
+        fRec = QFormLayout(gbReceiver)
+        fRec.setLabelAlignment(Qt.AlignRight)
+        fRec.setFormAlignment(Qt.AlignLeft)
+
+        self.leAuditName  = QLineEdit();  self.leAuditName.setPlaceholderText("OpticsAudit")
+        self.leAuditPath  = QLineEdit()
+        self.btnAuditPath = QPushButton("Обзор…")
+        hPath = QHBoxLayout(); hPath.addWidget(self.leAuditPath); hPath.addWidget(self.btnAuditPath)
+
+        self.spinMaxSize  = QSpinBox();  self.spinMaxSize.setRange(1, 10240); self.spinMaxSize.setSuffix(" МБ")
+        self.spinMaxFiles = QSpinBox();  self.spinMaxFiles.setRange(1, 512)
+
+        self.btnCreateAudit = QPushButton("Создать / изменить аудит")
+
+        fRec.addRow("Имя аудита:",     self.leAuditName)
+        fRec.addRow("Каталог файлов:", hPath)
+        fRec.addRow("Макс. размер:",   self.spinMaxSize)
+        fRec.addRow("Макс. файлов:",   self.spinMaxFiles)
+        fRec.addRow(self.btnCreateAudit)
+
+        layout.addWidget(gbReceiver)
+
+        # --- Группа 2. Спецификация ----------------------
+        gbSpec = QGroupBox("Спецификация аудита")
+        fSpec = QFormLayout(gbSpec)
+        fSpec.setLabelAlignment(Qt.AlignRight)
+        fSpec.setFormAlignment(Qt.AlignLeft)
+
+        # уровень
+        hLvl = QHBoxLayout()
+        self.rbServer = QRadioButton("Server‑level"); self.rbServer.setChecked(True)
+        self.rbDb     = QRadioButton("Database‑level")
+        hLvl.addWidget(self.rbServer); hLvl.addWidget(self.rbDb)
+        fSpec.addRow("Уровень:", hLvl)
+
+        # база
+        self.cbSpecDb = QComboBox(); self.cbSpecDb.setEnabled(False)
+        fSpec.addRow("База данных:", self.cbSpecDb)
+
+        # действия (ограничиваем высоту)
+        self.listActions = QListWidget()
+        self.listActions.setMaximumHeight(100)
+        for ag in [
+            "DATABASE_OBJECT_CHANGE_GROUP",
+            "DATABASE_PRINCIPAL_CHANGE_GROUP",
+            "SCHEMA_OBJECT_ACCESS_GROUP",
+            "SUCCESSFUL_LOGIN_GROUP",
+            "FAILED_LOGIN_GROUP"
+        ]:
+            itm = QListWidgetItem(ag)
+            itm.setFlags(itm.flags() | Qt.ItemIsUserCheckable)
+            itm.setCheckState(Qt.Unchecked)
+            self.listActions.addItem(itm)
+        fSpec.addRow("Действия:", self.listActions)
+
+        self.btnCreateSpec = QPushButton("Создать / изменить спецификацию")
+        fSpec.addRow(self.btnCreateSpec)
+        layout.addWidget(gbSpec)
+
+        # переключатель активности
+        gbState = QGroupBox("Состояние аудита")
+        hState = QHBoxLayout(gbState)
+        self.lblAuditState  = QLabel("OFF"); self.lblAuditState.setAlignment(Qt.AlignCenter)
+        self.lblAuditState.setStyleSheet("font-weight:600;")
+        self.btnToggleAudit = QPushButton("Включить")
+        hState.addWidget(self.lblAuditState); hState.addStretch(); hState.addWidget(self.btnToggleAudit)
+        layout.addWidget(gbState)
+
+        # --- Группа 4. Просмотр журнала -----------------
+        gbLog = QGroupBox("Просмотр журнала")
+        vLog  = QVBoxLayout(gbLog)
+        self.btnRefreshLog = QPushButton("Обновить")
+        self.tblAuditLog   = QTableWidget()
+        self.tblAuditLog.setMinimumHeight(200)
+        vLog.addWidget(self.btnRefreshLog)
+        vLog.addWidget(self.tblAuditLog)
+        layout.addWidget(gbLog)
+
+        layout.addStretch()
+
+        # --- логика включения базы при Database‑level ----
+        self.rbDb.toggled.connect(lambda on: self.cbSpecDb.setEnabled(on))
 
     def retranslateUi(self, SecurityWindow):
         _translate = QCoreApplication.translate

@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QAbstractItemView, QTableWidgetItem, QListWidget, QListWidgetItem, QDialogButtonBox,QDialog, QVBoxLayout
 from security_window_ui import Ui_SecurityWindow
 from PySide6.QtCore import Qt
+import os
 
 class SecurityWindow(QMainWindow):
     def __init__(self, db_connection):
@@ -28,7 +29,9 @@ class SecurityWindow(QMainWindow):
             lambda: self.ui.stackedWidget.setCurrentIndex(4))
         self.ui.btnMask.clicked.connect(
             lambda: self.ui.stackedWidget.setCurrentIndex(5))
-        
+        self.ui.btnAudit.clicked.connect(
+            lambda: self.ui.stackedWidget.setCurrentIndex(6)) 
+    
         # Подключаем новые обработчики
         self.ui.btnCreateLogin.clicked.connect(self.create_login)
         self.ui.btnCreateUser.clicked.connect(self.create_user)
@@ -49,6 +52,11 @@ class SecurityWindow(QMainWindow):
         self.ui.btnDoMask.clicked.connect(self.apply_mask)
         self.ui.btnDoUnmask.clicked.connect(self.remove_mask)
 
+        self.ui.btnAuditPath.clicked.connect(self.select_audit_path)
+        self.ui.btnCreateAudit.clicked.connect(self.create_or_update_audit)
+        self.ui.btnCreateSpec.clicked.connect(self.create_or_update_spec)
+        self.ui.btnToggleAudit.clicked.connect(self.toggle_audit_state)
+        self.ui.btnRefreshLog.clicked.connect(self.refresh_audit_log)
 
         # Загрузка данных
         self.load_users_and_roles()
@@ -56,6 +64,7 @@ class SecurityWindow(QMainWindow):
         self.load_available_logins()
         self.load_existing_users()
         self.load_mask_tables()
+        self.load_audit_initial()
 
     def load_users_and_roles(self):
         try:
@@ -133,6 +142,49 @@ class SecurityWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить пользователей: {str(e)}")
             
+    def load_audit_initial(self):
+        try:
+            cur = self.db_connection.get_cursor()
+
+            # Загрузка списка баз данных для создания спецификации
+            cur.execute("SELECT name FROM sys.databases WHERE database_id > 4;")
+            self.ui.cbSpecDb.clear()
+            self.ui.cbSpecDb.addItems([r[0] for r in cur.fetchall()])
+
+            # Автоподстановка имени аудита, если поле пустое
+            if not self.ui.leAuditName.text().strip():
+                cur.execute("SELECT TOP (1) name FROM sys.server_audits;")
+                row = cur.fetchone()
+                if row:
+                    self.ui.leAuditName.setText(row[0])
+
+            # Получение текущего состояния и пути аудита из DMV
+            name = self.ui.leAuditName.text().strip()
+            if name:
+                cur.execute("USE master;")
+                cur.execute("""
+                    SELECT status_desc, audit_file_path
+                    FROM sys.dm_server_audit_status
+                    WHERE name = ?
+                """, (name,))
+                row = cur.fetchone()
+                if row:
+                    state, fullpath = row
+                    # Отображаем статус
+                    self.ui.lblAuditState.setText(state)
+                    # Меняем текст кнопки в зависимости от состояния
+                    self.ui.btnToggleAudit.setText(
+                        "Выключить" if state.upper() == "STARTED" else "Включить"
+                    )
+                    # Если путь ещё не задан в UI — вычленяем каталог из полного пути
+                    if not self.ui.leAuditPath.text().strip() and fullpath:
+                        folder = os.path.dirname(fullpath)
+                        if not folder.endswith(os.sep):
+                            folder += os.sep
+                        self.ui.leAuditPath.setText(folder)
+
+        except Exception as e:
+            print("init audit page:", e)
 
     def create_login(self):
         """Создание нового логина"""
@@ -666,3 +718,201 @@ class SecurityWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка при удалении маскировки: {str(e)}")
 
+    def select_audit_path(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Выберите каталог для файлов аудита", ""
+        )
+        if path:
+            # нормализуем слэши и добавляем завершающий
+            path = os.path.normpath(path)
+            if not path.endswith(os.sep):
+                path += os.sep
+            self.ui.leAuditPath.setText(path)
+
+    def create_or_update_audit(self):
+        name      = self.ui.leAuditName.text().strip()
+        folder    = self.ui.leAuditPath.text().strip()
+        max_size  = self.ui.spinMaxSize.value()
+        max_files = self.ui.spinMaxFiles.value()
+        # можно брать имя БД из подключения, или жестко указать 'Optics'
+        db_name   = getattr(self.db_connection, "database", "Optics")
+
+        if not (name and folder):
+            QMessageBox.warning(self, "Ошибка", "Заполните имя аудита и каталог.")
+            return
+
+        # ещё раз нормализуем папку под SQL Server
+        folder = folder.replace('/', '\\')
+        if not folder.endswith('\\'):
+            folder += '\\'
+
+        try:
+            cur = self.db_connection.get_cursor()
+            # убедимся, что в контексте master
+            cur.execute("USE master;")
+            # единичный вызов процедуры
+            cur.execute(
+                "EXEC master.dbo.sp_CreateAudit "
+                "@AuditName = ?, @AuditPath = ?, @MaxSizeMB = ?, @MaxFiles = ?, @DatabaseName = ?",
+                (name, folder, max_size, max_files, db_name)
+            )
+            self.db_connection.connection.commit()
+            QMessageBox.information(self, "Успех", "Аудит создан/обновлён через процедуру.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+
+    def create_or_update_spec(self):
+        audit_name = self.ui.leAuditName.text().strip()
+        if not audit_name:
+            QMessageBox.warning(self, "Ошибка", "Сначала создайте Audit (SERVER AUDIT).")
+            return
+
+        actions = [
+            self.ui.listActions.item(i).text()
+            for i in range(self.ui.listActions.count())
+            if self.ui.listActions.item(i).checkState() == Qt.Checked
+        ]
+        if not actions:
+            QMessageBox.warning(self, "Ошибка", "Отметьте хотя бы одно действие.")
+            return
+
+        try:
+            cur = self.db_connection.get_cursor()
+
+            if self.ui.rbServer.isChecked():
+                spec = f"{audit_name}_ServerSpec"
+                cur.execute("USE master;")
+
+                cur.execute("""
+                    IF EXISTS (SELECT 1 FROM sys.server_audit_specifications WHERE name = ?)
+                    BEGIN
+                        ALTER SERVER AUDIT SPECIFICATION [{}] WITH (STATE = OFF);
+                        DROP  SERVER AUDIT SPECIFICATION [{}];
+                    END
+                """.format(spec, spec), (spec,))
+
+                cur.execute(f"CREATE SERVER AUDIT SPECIFICATION [{spec}] "
+                            f"FOR SERVER AUDIT [{audit_name}];")
+
+                for ag in actions:
+                    cur.execute(f"ALTER SERVER AUDIT SPECIFICATION [{spec}] ADD ({ag});")
+
+                cur.execute(f"ALTER SERVER AUDIT SPECIFICATION [{spec}] WITH (STATE = ON);")
+
+            else:  # Database‑level
+                db_name = self.ui.cbSpecDb.currentText()
+                spec = f"{audit_name}_{db_name}_DbSpec"
+
+                cur.execute(f"USE [{db_name}];")
+
+                cur.execute("""
+                    IF EXISTS (SELECT 1 FROM sys.database_audit_specifications WHERE name = ?)
+                    BEGIN
+                        ALTER DATABASE AUDIT SPECIFICATION [{}] WITH (STATE = OFF);
+                        DROP  DATABASE AUDIT SPECIFICATION [{}];
+                    END
+                """.format(spec, spec), (spec,))
+
+                cur.execute(f"CREATE DATABASE AUDIT SPECIFICATION [{spec}] "
+                            f"FOR SERVER AUDIT [{audit_name}];")
+
+                for ag in actions:
+                    cur.execute(f"ALTER DATABASE AUDIT SPECIFICATION [{spec}] ADD ({ag});")
+
+                cur.execute(f"ALTER DATABASE AUDIT SPECIFICATION [{spec}] WITH (STATE = ON);")
+
+            self.db_connection.connection.commit()
+            QMessageBox.information(self, "Успех", "Спецификация создана / обновлена.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    def toggle_audit_state(self):
+        name = self.ui.leAuditName.text().strip()
+        if not name:
+            return
+
+        try:
+            cur = self.db_connection.get_cursor()
+            cur.execute("USE master;")
+
+            # Получаем флаг is_state_enabled и возможный статус из DMV
+            cur.execute("""
+                SELECT 
+                    s.is_state_enabled,
+                    d.status_desc
+                FROM sys.server_audits AS s
+                LEFT JOIN sys.dm_server_audit_status AS d
+                ON s.name = d.name
+                WHERE s.name = ?
+            """, (name,))
+            row = cur.fetchone()
+            if not row:
+                QMessageBox.warning(self, "Ошибка", f"Аудит «{name}» не найден.")
+                return
+
+            is_enabled, status_desc = row
+            # Если status_desc есть — он точнее, иначе смотрим на is_state_enabled
+            current = (
+                status_desc.upper()
+                if status_desc
+                else ("STARTED" if is_enabled == 1 else "OFF")
+            )
+
+            # Меняем состояние: если сейчас запущен — выключаем, иначе — включаем
+            new_onoff = "OFF" if current == "STARTED" else "ON"
+            cur.execute(f"ALTER SERVER AUDIT [{name}] WITH (STATE = {new_onoff});")
+            self.db_connection.connection.commit()
+
+            # Обновляем UI
+            display = "STARTED" if new_onoff == "ON" else "OFF"
+            self.ui.lblAuditState.setText(display)
+            self.ui.btnToggleAudit.setText(
+                "Выключить" if display == "STARTED" else "Включить"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+
+    def refresh_audit_log(self):
+        folder = self.ui.leAuditPath.text().strip()
+        if not folder:
+            QMessageBox.warning(self, "Ошибка", "Не указан каталог файлов аудита.")
+            return
+
+        # нормализация пути
+        folder = folder.replace('/', '\\')
+        if not folder.endswith('\\'):
+            folder += '\\'
+        pattern = folder + "*.sqlaudit"
+
+        try:
+            cur = self.db_connection.get_cursor()
+            cur.execute("USE master;")
+            cur.execute("""
+                SELECT TOP 200
+                    event_time,
+                    action_id,
+                    succeeded,
+                    server_principal_name,
+                    database_name,
+                    schema_name,
+                    object_name,
+                    statement
+                FROM sys.fn_get_audit_file(?, DEFAULT, DEFAULT)
+                ORDER BY event_time DESC;
+            """, (pattern,))    
+
+            rows    = cur.fetchall()
+            headers = [d[0] for d in cur.description]
+            tbl     = self.ui.tblAuditLog
+            tbl.setRowCount(len(rows))
+            tbl.setColumnCount(len(headers))
+            tbl.setHorizontalHeaderLabels(headers)
+
+            for r, row in enumerate(rows):
+                for c, val in enumerate(row):
+                    tbl.setItem(r, c, QTableWidgetItem(str(val) if val is not None else ""))
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
