@@ -96,11 +96,7 @@ class SecurityWindow(QMainWindow):
             
             # Загрузка ролей
             cursor.execute("""
-                SELECT name 
-                FROM sys.database_principals 
-                WHERE type = 'R' 
-                AND name NOT LIKE 'db_%'  -- исключаем стандартные роли
-                ORDER BY name
+                EXEC usp_GetAllRoles
             """)
             roles = [row[0] for row in cursor.fetchall()]
             
@@ -519,51 +515,49 @@ class SecurityWindow(QMainWindow):
             self.ui.leStandbyFile.setText(path)
 
     def restore_database(self):
-        """Выполнить восстановление через usp_RestoreDatabase из контекста master."""
-        backup_path  = self.ui.leRestoreFile.text().strip()
-        mode         = self.ui.cbRestoreMode.currentText()
+        backup_path = self.ui.leRestoreFile.text().strip()
+        mode = self.ui.cbRestoreMode.currentText()
         replace_flag = 1 if self.ui.cbReplace.isChecked() else 0
         standby_file = self.ui.leStandbyFile.text().strip() if mode == "STANDBY" else None
 
-        # Текущая база, в которую нужно вернуть контекст
         db_name = getattr(self.db_connection, "database", None)
         if not db_name:
             QMessageBox.warning(self, "Ошибка", "Не удалось определить текущую базу данных.")
             return
 
-        # 2) Валидация
         if not backup_path:
-            QMessageBox.warning(self, "Ошибка", "Укажите файл бэкапа для восстановления")
+            QMessageBox.warning(self, "Ошибка", "Укажите файл бэкапа.")
             return
         if mode == "STANDBY" and not standby_file:
-            QMessageBox.warning(self, "Ошибка", "Для режима STANDBY укажите файл Standby")
+            QMessageBox.warning(self, "Ошибка", "Для STANDBY укажите standby-файл.")
             return
 
         cursor = self.db_connection.get_cursor()
+        
+        # Сохраняем текущий режим autocommit
+        original_autocommit = self.db_connection.connection.autocommit
         try:
-            # 3) Переключаемся в master и вызываем процедуру
+            # Включаем autocommit для RESTORE
+            self.db_connection.connection.autocommit = True
+
+            # Выполняем восстановление
             cursor.execute("USE master;")
             cursor.execute(
                 "EXEC master.dbo.usp_RestoreDatabase ?, ?, ?, ?, ?",
                 (db_name, backup_path, mode, replace_flag, standby_file)
             )
-            self.db_connection.connection.commit()
+
+            QMessageBox.information(self, "Успех", f"База «{db_name}» восстановлена")
 
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка восстановления", str(e))
-            return
-
+            QMessageBox.critical(self, "Ошибка", f"Ошибка восстановления: {str(e)}")
         finally:
-            # 4) Всегда возвращаемся в исходную базу
+            # Восстанавливаем исходный режим autocommit
+            self.db_connection.connection.autocommit = original_autocommit
             try:
                 cursor.execute(f"USE [{db_name}];")
-            except:
-                # если не удалось, просто игнорируем — основная работа уже сделана
-                pass
-
-        # 5) Успех
-        QMessageBox.information(self, "Успех", f"База «{db_name}» успешно восстановлена")
-
+            except Exception as e:
+                print(f"Не удалось переключиться на базу: {str(e)}")
 
 
     def select_columns(self):
