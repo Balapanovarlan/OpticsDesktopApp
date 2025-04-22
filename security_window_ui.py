@@ -169,7 +169,6 @@ class Ui_SecurityWindow(object):
         self.setupAuditPage()                     
         self.stackedWidget.addWidget(self.pageAudit)
 
-            
         # Компоновка
         self.mainLayout.addWidget(self.sidebar)
         self.mainLayout.addWidget(self.stackedWidget)
@@ -550,7 +549,7 @@ class Ui_SecurityWindow(object):
         self.btnAuditPath = QPushButton("Обзор…")
         hPath = QHBoxLayout(); hPath.addWidget(self.leAuditPath); hPath.addWidget(self.btnAuditPath)
 
-        self.spinMaxSize  = QSpinBox();  self.spinMaxSize.setRange(1, 10240); self.spinMaxSize.setSuffix(" МБ")
+        self.spinMaxSize  = QSpinBox();  self.spinMaxSize.setRange(2, 10240); self.spinMaxSize.setSuffix(" МБ")
         self.spinMaxFiles = QSpinBox();  self.spinMaxFiles.setRange(1, 512)
 
         self.btnCreateAudit = QPushButton("Создать / изменить аудит")
